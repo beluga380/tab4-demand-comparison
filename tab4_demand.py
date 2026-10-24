@@ -198,9 +198,19 @@ def monthly_ai(key: str, dates: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def build_window(key: str, dates: pd.DataFrame, spend: pd.DataFrame) -> dict:
+def window_months(key: str, dates: pd.DataFrame, spend: pd.DataFrame) -> list[pd.Timestamp]:
+    """Months where both the AI-use series and construction spending have a value."""
+    ai = monthly_ai(key, dates)
+    return sorted(set(ai["month"]) & set(spend["month"]))
+
+
+def build_window(key: str, dates: pd.DataFrame, spend: pd.DataFrame,
+                 start: pd.Timestamp | None = None, stop: pd.Timestamp | None = None) -> dict:
+    """Index both series to 100 in the first month of the window (start to stop, inclusive)."""
     ai = monthly_ai(key, dates)
     both = ai.merge(spend, on="month", how="inner").sort_values("month").reset_index(drop=True)
+    if start is not None:
+        both = both[(both["month"] >= start) & (both["month"] <= stop)].reset_index(drop=True)
     base, end = both.iloc[0], both.iloc[-1]
     both["idx_supply"] = both["spend"] / base["spend"] * 100
     both["idx_demand"] = both["ai"] / base["ai"] * 100
@@ -348,14 +358,38 @@ def render() -> None:
 
     dates = load_dates()
     spend = load_construction()
-    windows = [build_window(k, dates, spend) for k in ("old", "now")]
-    old, now = windows
+    full = {k: window_months(k, dates, spend) for k in ("old", "now")}
     latest_ai = monthly_ai("now", dates).iloc[-1]
     btos_now = load_btos("now")
     latest_period = max(p for p, v in btos_now["raw"].items() if not math.isnan(_pct(v)))
 
+    # --- Month-range sliders ---------------------------------------------------
+    # Dana can move the start and end month of each window. Everything below
+    # (cards, chart, verdict, trace) is recalculated from the months she picks.
+    # The defaults are the full windows.
+    cards_box = st.container()
+    st.markdown("**Choose the months to compare.** The first month picked becomes 100 for both lines.")
+    chart_box = st.container(border=True)
+    spans = {}
+    with chart_box:
+        s_old, s_now = st.columns([max(len(full["old"]), 1), max(len(full["now"]), 1) + 4], gap="large")
+        for col, key in ((s_old, "old"), (s_now, "now")):
+            months = full[key]
+            pick = col.select_slider(
+                f"{WINDOWS[key]['short']} ({WINDOWS[key]['wording']})",
+                options=months, value=(months[0], months[-1]),
+                format_func=lambda m: m.strftime("%b %Y"), key=f"tab4_range_{key}",
+            )
+            if pick[0] == pick[1]:
+                col.warning("Pick two different months to compare growth. Showing the full window for now.",
+                            icon="↔️")
+                pick = (months[0], months[-1])
+            spans[key] = pick
+    windows = [build_window(k, dates, spend, *spans[k]) for k in ("old", "now")]
+    old, now = windows
+
     # --- Summary cards ------------------------------------------------------
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3 = cards_box.columns(3)
     for col, w in ((c1, old), (c2, now)):
         head, _ = verdict(w["ratio"])
         col.metric(
@@ -371,7 +405,7 @@ def render() -> None:
     )
 
     # --- Main chart ---------------------------------------------------------
-    with st.container(border=True):
+    with chart_box:
         st.altair_chart(build_chart(windows), width="stretch")
         st.caption(
             "Hover over either panel to see both index values and the raw numbers for that month. "
